@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>My Journal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #000; color: #eee; }
+        textarea { resize: none; -webkit-appearance: none; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        /* トーストアニメーション */
+        @keyframes fadeInOut {
+            0% { opacity: 0; transform: translateY(20px) translateX(-50%); }
+            10% { opacity: 1; transform: translateY(0) translateX(-50%); }
+            90% { opacity: 1; transform: translateY(0) translateX(-50%); }
+            100% { opacity: 0; transform: translateY(-20px) translateX(-50%); }
+        }
+        .toast { animation: fadeInOut 3s forwards; }
+    </style>
+</head>
+<body class="h-screen w-screen overflow-hidden flex flex-col bg-black text-gray-200">
+    <div id="view-input" class="flex-1 flex flex-col relative z-10">
+        <div class="h-14 flex items-center justify-between px-4 border-b border-gray-900 bg-black/80 backdrop-blur-md z-50">
+            <button id="menu-btn" class="text-gray-500 hover:text-white p-2">
+                <i class="fa-solid fa-bars fa-lg"></i>
+            </button>
+            <span id="status-indicator" class="text-xs text-gray-600 font-mono">Connecting...</span>
+            <button id="save-btn" class="text-blue-500 font-bold px-3 py-1 rounded hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed">
+                保存
+            </button>
+        </div>
+        <textarea id="journal-input" 
+            class="flex-1 w-full bg-black text-lg p-5 leading-relaxed focus:outline-none placeholder-gray-800"
+            placeholder="思考を記録..."></textarea>
+    </div>
+    <div id="view-archive" class="hidden absolute inset-0 z-20 flex flex-col bg-black">
+        <div class="h-14 flex items-center justify-between px-4 border-b border-gray-900">
+            <h2 class="text-lg font-bold tracking-wider text-gray-400">LOGS</h2>
+            <div class="flex gap-4 items-center">
+                <button id="toggle-list" class="text-white"><i class="fa-solid fa-list"></i></button>
+                <button id="toggle-calendar" class="text-gray-600"><i class="fa-solid fa-calendar"></i></button>
+                <div class="w-px h-4 bg-gray-800 mx-2"></div>
+                <button id="close-archive" class="text-gray-400"><i class="fa-solid fa-xmark fa-lg"></i></button>
+            </div>
+        </div>
+        <div id="archive-content" class="flex-1 overflow-y-auto no-scrollbar p-4">
+            <div id="list-container" class="flex flex-col gap-3 pb-20"></div>
+            <div id="calendar-container" class="hidden grid grid-cols-7 gap-1 text-center pb-20"></div>
+        </div>
+    </div>
+    <div id="detail-modal" class="hidden fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-gray-900 w-full max-w-md h-3/4 rounded-xl p-5 flex flex-col shadow-2xl border border-gray-800">
+            <div class="flex justify-between items-center mb-4">
+                <span id="detail-date" class="text-xs text-gray-500 font-mono"></span>
+                <button id="close-detail" class="text-gray-400 p-2"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <textarea id="detail-text" class="flex-1 bg-transparent text-base focus:outline-none resize-none mb-4 text-gray-200"></textarea>
+            <div class="flex justify-end">
+                <button id="update-btn" class="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-bold shadow-lg">更新</button>
+            </div>
+        </div>
+    </div>
+    <div id="toast-container" class="fixed bottom-10 left-1/2 transform -translate-x-1/2 z-50 pointer-events-none w-max"></div>
+    <script type="module">
+        // --- Firebase Imports ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js";
+        import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js"; // Authを追加
+        import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, serverTimestamp, query, orderBy } 
+        from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
+        // Firebase Configuration (※GitHub等に公開する際は実際のAPIキーを入力してください)
+        const firebaseConfig = {
+           apiKey: "YOUR_API_KEY",
+           authDomain: "YOUR_AUTH_DOMAIN",
+           projectId: "YOUR_PROJECT_ID",
+           storageBucket: "YOUR_STORAGE_BUCKET",
+           messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+           appId: "YOUR_APP_ID"
+        };
+        // Initialize Firebase & Auth
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const journalsRef = collection(db, "journals");
+        const provider = new GoogleAuthProvider(); // Google認証用
+        // DOM Elements
+        const statusIndicator = document.getElementById('status-indicator');
+        const journalInput = document.getElementById('journal-input');
+        const saveBtn = document.getElementById('save-btn'); // ここがログインボタンも兼ねる
+        const viewArchive = document.getElementById('view-archive');
+        const listContainer = document.getElementById('list-container');
+        const calendarContainer = document.getElementById('calendar-container');
+        
+        let allEntries = [];
+        let isLoggingIn = false; // ログイン処理中フラグ
+        // --- 1. 起動時の処理（状態監視） ---
+        window.onload = () => {
+            journalInput.focus();
+        };
+        // ログイン状態が変わったらボタンの役割を変える
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                // ログイン済み：ボタンを「保存」にする
+                statusIndicator.innerText = "Ready";
+                statusIndicator.className = "text-xs text-green-600 font-mono";
+                saveBtn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> 保存';
+                saveBtn.classList.remove('bg-blue-600', 'text-white'); // スタイル戻す
+                saveBtn.classList.add('text-blue-500'); 
+                saveBtn.onclick = saveJournal; // クリック時の動作を「保存」に
+            } else {
+                // 未ログイン：ボタンを「Googleログイン」にする
+                statusIndicator.innerText = "Login Required";
+                statusIndicator.className = "text-xs text-yellow-600 font-mono";
+                saveBtn.innerHTML = '<i class="fa-brands fa-google"></i> Login';
+                saveBtn.classList.remove('text-blue-500');
+                saveBtn.classList.add('bg-blue-600', 'text-white'); // 目立たせる
+                saveBtn.onclick = loginWithGoogle; // クリック時の動作を「ログイン」に
+            }
+        });
+        // --- 2. アクション関数 ---
+        // Googleログイン処理
+        async function loginWithGoogle() {
+            if(isLoggingIn) return;
+            isLoggingIn = true;
+            statusIndicator.innerText = "Pop-up opened...";
+            
+            try {
+                await signInWithPopup(auth, provider);
+                // 成功すると onAuthStateChanged が勝手に動いてボタンが「保存」に変わる
+            } catch (error) {
+                console.error(error);
+                statusIndicator.innerText = "Auth Failed";
+                alert("ログインに失敗しました: " + error.message);
+            } finally {
+                isLoggingIn = false;
+            }
+        }
+        // 保存処理
+        async function saveJournal() {
+            const text = journalInput.value.trim();
+            if (!text) return;
+            statusIndicator.innerText = "Saving...";
+            
+            try {
+                await addDoc(journalsRef, {
+                    text: text,
+                    createdAt: serverTimestamp(),
+                    uid: auth.currentUser.uid // GoogleのIDを記録
+                });
+                
+                journalInput.value = '';
+                journalInput.focus();
+                showToast('Saved');
+            } catch (e) {
+                console.error(e);
+                showToast('Error!', true);
+                alert("保存できませんでした。");
+            } finally {
+                statusIndicator.innerText = "Ready";
+            }
+        }
+        // --- 3. UI操作系 ---
+        document.getElementById('menu-btn').addEventListener('click', async () => {
+            viewArchive.classList.remove('hidden');
+            await loadEntries();
+            renderList();
+        });
+        document.getElementById('close-archive').addEventListener('click', () => {
+            viewArchive.classList.add('hidden');
+        });
+        // リスト/カレンダー切り替え
+        const toggleList = document.getElementById('toggle-list');
+        const toggleCalendar = document.getElementById('toggle-calendar');
+        toggleList.addEventListener('click', () => {
+            listContainer.classList.remove('hidden');
+            calendarContainer.classList.add('hidden');
+            toggleList.classList.add('text-white'); toggleList.classList.remove('text-gray-600');
+            toggleCalendar.classList.add('text-gray-600'); toggleCalendar.classList.remove('text-white');
+            renderList();
+        });
+        toggleCalendar.addEventListener('click', () => {
+            listContainer.classList.add('hidden');
+            calendarContainer.classList.remove('hidden');
+            toggleCalendar.classList.add('text-white'); toggleCalendar.classList.remove('text-gray-600');
+            toggleList.classList.add('text-gray-600'); toggleList.classList.remove('text-white');
+            renderCalendar();
+        });
+        // 詳細モーダル
+        const detailModal = document.getElementById('detail-modal');
+        const detailText = document.getElementById('detail-text');
+        const detailDate = document.getElementById('detail-date');
+        let currentId = null;
+        document.getElementById('close-detail').addEventListener('click', () => detailModal.classList.add('hidden'));
+        document.getElementById('update-btn').addEventListener('click', async () => {
+            if(!currentId) return;
+            try {
+                await updateDoc(doc(db, "journals", currentId), { text: detailText.value });
+                detailModal.classList.add('hidden');
+                showToast('Updated');
+                await loadEntries(); // リロード
+                if(!listContainer.classList.contains('hidden')) renderList();
+                else renderCalendar();
+            } catch(e) {
+                console.error(e);
+                showToast('Update Error', true);
+            }
+        });
+        // データ読み込み
+        async function loadEntries() {
+            statusIndicator.innerText = "Loading...";
+            const q = query(journalsRef, orderBy("createdAt", "desc"));
+            const snapshot = await getDocs(q);
+            allEntries = snapshot.docs.map(d => ({
+                id: d.id,
+                ...d.data(),
+                date: d.data().createdAt ? d.data().createdAt.toDate() : new Date()
+            }));
+            statusIndicator.innerText = "Ready";
+        }
+        // リスト描画
+        function renderList() {
+            listContainer.innerHTML = '';
+            allEntries.forEach(entry => {
+                const el = document.createElement('div');
+                el.className = 'bg-gray-900 p-4 rounded border-l-2 border-gray-700 cursor-pointer hover:bg-gray-800';
+                const summary = entry.text.length > 50 ? entry.text.substring(0, 50) + '...' : entry.text;
+                el.innerHTML = `<div class="text-xs text-gray-500 mb-1">${entry.date.toLocaleString('ja-JP')}</div><div class="text-gray-300 text-sm">${escapeHtml(summary)}</div>`;
+                el.addEventListener('click', () => openDetail(entry));
+                listContainer.appendChild(el);
+            });
+        }
+        // カレンダー描画
+        function renderCalendar() {
+            calendarContainer.innerHTML = '';
+            const now = new Date();
+            const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+            const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).getDay();
+            
+            ['日','月','火','水','木','金','土'].forEach(d => calendarContainer.innerHTML += `<div class="text-gray-600 text-xs py-2">${d}</div>`);
+            for(let i=0; i<firstDay; i++) calendarContainer.innerHTML += `<div></div>`;
+            
+            for(let d=1; d<=daysInMonth; d++) {
+                const dayStart = new Date(now.getFullYear(), now.getMonth(), d);
+                const dayEnd = new Date(now.getFullYear(), now.getMonth(), d, 23, 59, 59);
+                const entry = allEntries.find(e => e.date >= dayStart && e.date <= dayEnd);
+                
+                const el = document.createElement('div');
+                el.className = `h-10 w-10 flex items-center justify-center rounded-full text-sm mx-auto ${entry ? 'bg-gray-800 text-white font-bold cursor-pointer border border-gray-600' : 'text-gray-600'}`;
+                el.innerText = d;
+                if(entry) el.addEventListener('click', () => openDetail(entry));
+                calendarContainer.appendChild(el);
+            }
+        }
+        // 詳細表示
+        function openDetail(entry) {
+            currentId = entry.id;
+            detailDate.innerText = entry.date.toLocaleString('ja-JP');
+            detailText.value = entry.text;
+            detailModal.classList.remove('hidden');
+        }
+        // トースト表示
+        function showToast(msg, isErr=false) {
+            const t = document.createElement('div');
+            t.className = `toast px-6 py-2 rounded-full text-sm font-bold shadow-xl ${isErr ? 'bg-red-900 text-white' : 'bg-white text-black'}`;
+            t.innerText = msg;
+            document.getElementById('toast-container').appendChild(t);
+            setTimeout(() => t.remove(), 3000);
+        }
+        // HTMLエスケープ
+        function escapeHtml(str) {
+            if(!str) return '';
+            return str.replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' })[m]);
+        }
+    </script>
+</body>
+</html>
